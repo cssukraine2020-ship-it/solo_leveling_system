@@ -570,12 +570,21 @@ function defaultState(){
 function normalizeState(){
   if(!state || typeof state !== 'object') state = defaultState();
   if(!state.character) state.character = defaultState().character;
+  /* Numeric fields are guarded individually, and only replaced when the
+     value is genuinely missing/corrupted (undefined, null, NaN, wrong
+     type) — never on a legitimate 0, so real XP/level progress already
+     sitting in the database is preserved as-is, not recalculated. */
+  var ch = state.character;
+  if(typeof ch.xpLife !== 'number' || isNaN(ch.xpLife)) ch.xpLife = 0;
+  if(typeof ch.xpTrade !== 'number' || isNaN(ch.xpTrade)) ch.xpTrade = 0;
+  if(typeof ch.levelLife !== 'number' || isNaN(ch.levelLife) || ch.levelLife < 1) ch.levelLife = 1;
+  if(typeof ch.levelTrade !== 'number' || isNaN(ch.levelTrade) || ch.levelTrade < 1) ch.levelTrade = 1;
+  if(typeof ch.unspentPoints !== 'number' || isNaN(ch.unspentPoints)) ch.unspentPoints = 0;
   if(!state.character.statsLife) state.character.statsLife = { discipline: 0, endurance: 0, focus: 0 };
   if(!state.character.statsTrade) state.character.statsTrade = { search: 0, prep: 0, charisma: 0 };
-  if(!state.character.unspentPoints && state.character.unspentPoints !== 0) state.character.unspentPoints = 0;
   if(!state.balance) state.balance = { gold: 0, free: 0 };
-  if(typeof state.balance.gold !== 'number') state.balance.gold = 0;
-  if(typeof state.balance.free !== 'number') state.balance.free = 0;
+  if(typeof state.balance.gold !== 'number' || isNaN(state.balance.gold)) state.balance.gold = 0;
+  if(typeof state.balance.free !== 'number' || isNaN(state.balance.free)) state.balance.free = 0;
   if(!state.deals) state.deals = [];
   state.deals.forEach(function(d){ if(!d.expenses) d.expenses = []; });
   if(!state.dailies) state.dailies = defaultState().dailies;
@@ -637,6 +646,15 @@ function addXp(branch, amount){
   var char = state.character;
   var leveledCount = 0;
 
+  /* Defensive coercion: if xp/level were ever corrupted to something
+     non-numeric (undefined/null/NaN), heal them here rather than letting
+     NaN propagate through the math and silently freeze/zero the bar. */
+  if(typeof char.xpLife !== 'number' || isNaN(char.xpLife)) char.xpLife = 0;
+  if(typeof char.xpTrade !== 'number' || isNaN(char.xpTrade)) char.xpTrade = 0;
+  if(typeof char.levelLife !== 'number' || isNaN(char.levelLife) || char.levelLife < 1) char.levelLife = 1;
+  if(typeof char.levelTrade !== 'number' || isNaN(char.levelTrade) || char.levelTrade < 1) char.levelTrade = 1;
+  if(typeof char.unspentPoints !== 'number' || isNaN(char.unspentPoints)) char.unspentPoints = 0;
+
   if(branch === 'life'){
     char.xpLife = Math.max(0, char.xpLife + amount);
     while(char.xpLife >= xpNeeded(char.levelLife)){
@@ -686,6 +704,11 @@ function removeXp(branch, amount){
   if(!amount) return;
   var char = state.character;
   var remaining = amount;
+  if(typeof char.xpLife !== 'number' || isNaN(char.xpLife)) char.xpLife = 0;
+  if(typeof char.xpTrade !== 'number' || isNaN(char.xpTrade)) char.xpTrade = 0;
+  if(typeof char.levelLife !== 'number' || isNaN(char.levelLife) || char.levelLife < 1) char.levelLife = 1;
+  if(typeof char.levelTrade !== 'number' || isNaN(char.levelTrade) || char.levelTrade < 1) char.levelTrade = 1;
+  if(typeof char.unspentPoints !== 'number' || isNaN(char.unspentPoints)) char.unspentPoints = 0;
   if(branch === 'life'){
     if(char.xpLife >= remaining){
       char.xpLife -= remaining;
@@ -1021,11 +1044,10 @@ App.submitSell = function(id){
     xpGain = Math.floor(margin / 100) * 10;
     goldGain = Math.max(1, Math.floor(margin / 100));
     state.balance.gold += goldGain;
+    addXp('trade', xpGain);
   }
   addJournal('deal', 'Продано: ' + deal.name, (margin>=0?'+':'') + fmtMoney(margin) + ' маржа', margin>=0?'green':'red');
   save(); closeForm(); renderAll();
-
-  if(margin > 0) addXp('trade', xpGain);
 
   queuePopup('СДЕЛКА ЗАКРЫТА',
     '<b>' + escapeHtml(deal.name) + '</b>' +
@@ -1076,9 +1098,9 @@ function reconcileCombo(){
   if(allDone && !state.dailies.comboAwarded){
     state.dailies.comboAwarded = true;
     state.balance.gold += 1;
-    addJournal('finance', 'Комбо: 3/3 обязательных дейликов', '+1 🪙', 'green');
-    save();
     addXp('life', 30);
+    addJournal('finance', 'Комбо: 3/3 обязательных дейликов', '+30 XP, +1 🪙', 'green');
+    save();
     queuePopup('КОМБО-ВЫПОЛНЕНИЕ', 'Все обязательные квесты дня закрыты!<span class="big">+30 XP · +1 🪙</span>Дисциплина укрепляется.');
   } else if(!allDone && state.dailies.comboAwarded){
     state.dailies.comboAwarded = false;
