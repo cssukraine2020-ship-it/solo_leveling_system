@@ -402,6 +402,22 @@ body::before{
 .radio-opt.selected{border-color:var(--accent); color:var(--accent); background:rgba(255,255,255,.03);}
 
 .toast-stack{position:fixed; top:16px; right:16px; z-index:250; display:flex; flex-direction:column; gap:8px;}
+.sync-fab{
+  position:fixed; bottom:16px; left:16px; z-index:210;
+  width:44px; height:44px; border-radius:50%; border:1px solid var(--line-soft);
+  background:var(--bg-2); color:var(--text-1); font-size:18px; cursor:pointer;
+  display:flex; align-items:center; justify-content:center;
+  box-shadow:0 0 10px -4px rgba(0,0,0,0.6);
+}
+.sync-fab:hover{border-color:var(--accent); color:var(--accent);}
+.sync-fab.synced{border-color:var(--success); color:var(--success);}
+.sync-fab.error{border-color:var(--danger); color:var(--danger);}
+.sync-code-display{
+  font-family:var(--font-mono); font-size:22px; letter-spacing:.25em; text-align:center;
+  background:var(--bg-0); border:1px solid var(--line-soft); padding:12px; color:var(--accent);
+  margin-bottom:6px; user-select:all;
+}
+.sync-status-line{font-family:var(--font-mono); font-size:10.5px; color:var(--text-2); text-align:center; margin-bottom:14px;}
 .toast{
   background:var(--bg-2); border:1px solid var(--accent); padding:10px 16px; font-family:var(--font-mono); font-size:12px;
   color:var(--text-0); box-shadow:0 0 16px -4px var(--accent); animation:toastIn .25s ease;
@@ -438,15 +454,23 @@ body::before{
   <div class="form-box" id="formBox"></div>
 </div>
 
+<button class="sync-fab" id="syncFab" onclick="App.openSyncForm()" title="Синхронизация между устройствами">🔗</button>
+
+<!-- Firebase compat SDK (classic global build, no bundler needed) -->
+<script src="https://www.gstatic.com/firebasejs/12.16.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/12.16.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/12.16.0/firebase-database-compat.js"></script>
+
 <script>
 /* =========================================================================
    СИСТЕМА: ТОРГОВЕЦ И ЖИЗНЬ — core engine (ES5, vanilla JS, localStorage)
    ========================================================================= */
 
 var STORAGE_KEY = 'solo_trader_system_v1';
+var SYNC_ID_KEY = 'solo_trader_sync_id';
 
 var RANKS = [
-  { min: 1,  max: 9,   color: '#ff3b4e', varName: '--rank-e', title: 'Перекуп' },
+  { min: 1,  max: 9,   color: '#ff3b4e', varName: '--rank-e', title: 'Уличный Барыга' },
   { min: 10, max: 19,  color: '#3ac2ff', varName: '--rank-d', title: 'Скупщик Лотов' },
   { min: 20, max: 29,  color: '#f5d443', varName: '--rank-c', title: 'Торговец' },
   { min: 30, max: 39,  color: '#3fe08a', varName: '--rank-b', title: 'Коммерсант' },
@@ -545,14 +569,25 @@ function load(){
       state = JSON.parse(raw);
       if(!state.character.unspentPoints && state.character.unspentPoints !== 0) state.character.unspentPoints = 0;
       if(!state.dailies.comboAwarded && state.dailies.comboAwarded !== false) state.dailies.comboAwarded = false;
+      if(!state.lastModified) state.lastModified = 0;
     } else {
       state = defaultState();
+      state.lastModified = 0;
     }
   }catch(e){
     state = defaultState();
+    state.lastModified = 0;
   }
 }
 function save(){
+  state.lastModified = Date.now();
+  try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }catch(e){}
+  pushToFirebase();
+}
+/* Writes to localStorage only, without re-pushing to Firebase — used when
+   applying data that just arrived FROM Firebase, so it doesn't echo back
+   into an update loop. */
+function saveLocalOnly(){
   try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }catch(e){}
 }
 
@@ -718,8 +753,139 @@ document.addEventListener('DOMContentLoaded', function(){
   });
 });
 
+/* =========================================================================
+   FIREBASE CLOUD SYNC (Realtime Database) — cross-device sync via a short
+   pairing code. Fully optional: if the SDK fails to load or the network is
+   offline, everything above keeps working purely from localStorage.
+   ========================================================================= */
+var firebaseConfig = {
+  apiKey: "AIzaSyDXIsCQYKKodfrN023Zv4Uck3A7ViwFY8I",
+  authDomain: "sololevelingsystem-e5271.firebaseapp.com",
+  databaseURL: "https://sololevelingsystem-e5271-default-rtdb.firebaseio.com",
+  projectId: "sololevelingsystem-e5271",
+  storageBucket: "sololevelingsystem-e5271.firebasestorage.app",
+  messagingSenderId: "85313452128",
+  appId: "1:85313452128:web:3f61d14dcf7e18fb452b05"
+};
+
+var syncId = null;
+var fbDb = null;
+var fbRef = null;
+var fbAuthed = false;
+var suppressPush = false;
+
+function genSyncId(){
+  var chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  var out = '';
+  for(var i=0;i<6;i++) out += chars.charAt(Math.floor(Math.random()*chars.length));
+  return out;
+}
+function getSyncId(){
+  try{
+    var v = localStorage.getItem(SYNC_ID_KEY);
+    if(!v){ v = genSyncId(); localStorage.setItem(SYNC_ID_KEY, v); }
+    return v;
+  }catch(e){ return genSyncId(); }
+}
+function setSyncFab(cls){
+  var fab = document.getElementById('syncFab');
+  if(!fab) return;
+  fab.classList.remove('synced','error');
+  if(cls) fab.classList.add(cls);
+}
+function pushToFirebase(){
+  if(!fbRef || suppressPush) return;
+  try{
+    fbRef.set(state).then(function(){
+      setSyncFab('synced');
+    }).catch(function(err){
+      setSyncFab('error');
+    });
+  }catch(e){ setSyncFab('error'); }
+}
+function attachSyncListener(){
+  if(!fbDb) return;
+  if(fbRef) { try{ fbRef.off(); }catch(e){} }
+  fbRef = fbDb.ref('syncData/' + syncId);
+  fbRef.on('value', function(snapshot){
+    var remote = snapshot.val();
+    if(!remote){
+      pushToFirebase();
+      return;
+    }
+    if(!state.lastModified || remote.lastModified > state.lastModified){
+      suppressPush = true;
+      state = remote;
+      if(!state.character.unspentPoints && state.character.unspentPoints !== 0) state.character.unspentPoints = 0;
+      saveLocalOnly();
+      renderAll();
+      setSyncFab('synced');
+      suppressPush = false;
+    } else {
+      setSyncFab('synced');
+    }
+  }, function(err){
+    setSyncFab('error');
+  });
+}
+function initSync(){
+  if(typeof firebase === 'undefined' || !firebase.database){ return; }
+  syncId = getSyncId();
+  try{
+    firebase.initializeApp(firebaseConfig);
+  }catch(e){ /* already initialized, ignore */ }
+  try{
+    fbDb = firebase.database();
+  }catch(e){ setSyncFab('error'); return; }
+
+  if(firebase.auth){
+    firebase.auth().signInAnonymously().then(function(){
+      fbAuthed = true;
+      attachSyncListener();
+    }).catch(function(err){
+      /* Anonymous auth not enabled in the Firebase console, or offline —
+         try attaching anyway in case database rules allow open access. */
+      attachSyncListener();
+    });
+  } else {
+    attachSyncListener();
+  }
+}
+
 /* ---------------------------- App actions ---------------------------- */
 var App = {};
+
+App.openSyncForm = function(){
+  var code = syncId || getSyncId();
+  openForm(
+    '<h3>Синхронизация между устройствами</h3>' +
+    '<div class="sync-code-display" id="fSyncIdView">' + code + '</div>' +
+    '<div class="sync-status-line">Введите этот код на другом устройстве, чтобы объединить данные</div>' +
+    '<div class="form-actions" style="justify-content:center; margin-bottom:18px;"><button class="btn" onclick="App.copySyncId()">Скопировать код</button></div>' +
+    '<div class="field"><label>Подключиться к другому коду</label><input type="text" id="fSyncIdInput" placeholder="Код с другого устройства" style="text-transform:uppercase;"></div>' +
+    '<div class="form-actions"><button class="btn ghost" onclick="closeForm()">Закрыть</button><button class="btn primary" onclick="App.connectSyncId()">Подключиться</button></div>'
+  );
+};
+App.copySyncId = function(){
+  var el = document.getElementById('fSyncIdView');
+  if(!el) return;
+  var range = document.createRange();
+  range.selectNodeContents(el);
+  var sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+  try{ document.execCommand('copy'); showToast('Код скопирован'); }catch(e){ showToast('Не удалось скопировать — выделите код вручную'); }
+  sel.removeAllRanges();
+};
+App.connectSyncId = function(){
+  var val = (document.getElementById('fSyncIdInput').value || '').trim().toUpperCase();
+  if(!val){ showToast('Введите код'); return; }
+  syncId = val;
+  try{ localStorage.setItem(SYNC_ID_KEY, syncId); }catch(e){}
+  closeForm();
+  showToast('Подключение к коду ' + syncId + '…');
+  if(fbDb) attachSyncListener();
+};
 
 /* ---- character ---- */
 App.renameCharacter = function(){
@@ -1505,6 +1671,7 @@ document.addEventListener('DOMContentLoaded', function(){
     checkDailyReset();
     if(state.dailies.date !== before) renderAll();
   }, 120000);
+  try{ initSync(); }catch(e){ setSyncFab('error'); }
 });
 </script>
 </body>
