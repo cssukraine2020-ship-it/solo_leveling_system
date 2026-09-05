@@ -562,14 +562,38 @@ function defaultState(){
   };
 }
 
+/* Firebase Realtime Database silently drops empty arrays/objects when data
+   is written (it has no real "empty array" type), so a field that was []
+   at save time can come back as undefined after a sync. This guarantees
+   every array/object the renderers rely on always exists, no matter where
+   state came from (fresh install, localStorage, or a Firebase snapshot). */
+function normalizeState(){
+  if(!state || typeof state !== 'object') state = defaultState();
+  if(!state.character) state.character = defaultState().character;
+  if(!state.character.statsLife) state.character.statsLife = { discipline: 0, endurance: 0, focus: 0 };
+  if(!state.character.statsTrade) state.character.statsTrade = { search: 0, prep: 0, charisma: 0 };
+  if(!state.character.unspentPoints && state.character.unspentPoints !== 0) state.character.unspentPoints = 0;
+  if(!state.balance) state.balance = { gold: 0, free: 0 };
+  if(typeof state.balance.gold !== 'number') state.balance.gold = 0;
+  if(typeof state.balance.free !== 'number') state.balance.free = 0;
+  if(!state.deals) state.deals = [];
+  state.deals.forEach(function(d){ if(!d.expenses) d.expenses = []; });
+  if(!state.dailies) state.dailies = defaultState().dailies;
+  if(!state.dailies.obligatory) state.dailies.obligatory = [];
+  if(!state.dailies.additional) state.dailies.additional = [];
+  if(!state.dailies.comboAwarded && state.dailies.comboAwarded !== false) state.dailies.comboAwarded = false;
+  if(!state.grimoire) state.grimoire = [];
+  if(!state.projects) state.projects = [];
+  if(!state.shop) state.shop = [];
+  if(!state.journal) state.journal = [];
+  if(!state.lastModified) state.lastModified = 0;
+}
+
 function load(){
   try{
     var raw = localStorage.getItem(STORAGE_KEY);
     if(raw){
       state = JSON.parse(raw);
-      if(!state.character.unspentPoints && state.character.unspentPoints !== 0) state.character.unspentPoints = 0;
-      if(!state.dailies.comboAwarded && state.dailies.comboAwarded !== false) state.dailies.comboAwarded = false;
-      if(!state.lastModified) state.lastModified = 0;
     } else {
       state = defaultState();
       state.lastModified = 0;
@@ -578,6 +602,7 @@ function load(){
     state = defaultState();
     state.lastModified = 0;
   }
+  normalizeState();
 }
 function save(){
   state.lastModified = Date.now();
@@ -816,7 +841,7 @@ function attachSyncListener(){
     if(!state.lastModified || remote.lastModified > state.lastModified){
       suppressPush = true;
       state = remote;
-      if(!state.character.unspentPoints && state.character.unspentPoints !== 0) state.character.unspentPoints = 0;
+      normalizeState();
       saveLocalOnly();
       renderAll();
       setSyncFab('synced');
@@ -1343,8 +1368,10 @@ App.setTab = function(tab){ currentTab = tab; renderAll(); };
    RENDER
    ========================================================================= */
 function renderAll(){
+  if(!state){ return; }
   applyRankGlow();
   var app = document.getElementById('app');
+  if(!app) return;
   app.innerHTML = renderHeader() + renderTabBar() + renderTabPages();
 }
 
@@ -1353,7 +1380,7 @@ function renderHeader(){
   var overall = getOverallLevel();
   var rank = getRank(overall);
   var rIdx = getRankIndex(overall);
-  var goodsMoney = state.deals.reduce(function(sum,d){ return d.status !== 'sold' ? sum + calcDealCost(d) : sum; }, 0);
+  var goodsMoney = (state.deals || []).reduce(function(sum,d){ return d.status !== 'sold' ? sum + calcDealCost(d) : sum; }, 0);
   var totalCapital = state.balance.free + goodsMoney;
 
   var lifeNeeded = xpNeeded(c.levelLife);
@@ -1611,13 +1638,13 @@ function renderShopTab(){
 /* ---- journal tab ---- */
 function renderJournalTab(){
   var now = new Date();
-  var monthDeals = state.deals.filter(function(d){
+  var monthDeals = (state.deals || []).filter(function(d){
     if(d.status !== 'sold' || !d.soldAt) return false;
     var dt = new Date(d.soldAt);
     return dt.getMonth() === now.getMonth() && dt.getFullYear() === now.getFullYear();
   });
-  var turnover = monthDeals.reduce(function(s,d){ return s + d.salePrice; }, 0);
-  var netMargin = monthDeals.reduce(function(s,d){ return s + (d.salePrice - calcDealCost(d)); }, 0);
+  var turnover = (monthDeals || []).reduce(function(s,d){ return s + d.salePrice; }, 0);
+  var netMargin = (monthDeals || []).reduce(function(s,d){ return s + (d.salePrice - calcDealCost(d)); }, 0);
 
   var html = '<div class="section-head"><h2><span class="dot">■</span> Финансовый и системный журнал</h2></div>';
   html += '<div class="journal-analytics">';
@@ -1633,7 +1660,7 @@ function renderJournalTab(){
   }
   html += '</div>';
 
-  var items = state.journal.filter(function(j){
+  var items = (state.journal || []).filter(function(j){
     if(journalFilter === 'all') return true;
     if(journalFilter === 'finance') return j.type === 'finance' || j.type === 'shop';
     return j.type === journalFilter;
